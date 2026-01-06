@@ -1,3 +1,13 @@
 .venv
 .elastic-copilot
 __pycache__
+.vercel
+.env
+*.pyc
+*.log
+.DS_Store
+.gcloudignore
+.dockerignore
+uploads/
+tmp/
+.cache/
