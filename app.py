@@ -1,14 +1,16 @@
 
-
 import cv2
 import numpy as np
 import mediapipe as mp
 import torch
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import JSONResponse
+from typing import Optional
 import torch.nn.functional as F
+import io
 
 
-app = Flask(__name__)
+app = FastAPI()
 
 mp_pose = mp.solutions.pose
 mp_holistic = mp.solutions.holistic
@@ -375,42 +377,45 @@ def validate_front_image(image_np):
         print(f"Error validating body image: {e}")
         return False, "You arent providing images correctly. Please try again."
     
-@app.route("/upload_images", methods=["POST"])
-def upload_images():
-    if "front" not in request.files:
-        return jsonify({"error": "Missing front image for reference."}), 400
+@app.post("/upload_images")
+async def upload_images(
+    front: UploadFile = File(...),
+    left_side: Optional[UploadFile] = File(None),
+    height_cm: Optional[float] = Form(None)
+):
+    # Read front image
+    front_image_bytes = await front.read()
+    front_image_np = np.frombuffer(front_image_bytes, np.uint8)
+    front_image = cv2.imdecode(front_image_np, cv2.IMREAD_COLOR)
     
-    front_image_file = request.files["front"]
-    front_image_np = np.frombuffer(front_image_file.read(), np.uint8)
-    front_image_file.seek(0)  # Reset file pointer
-    
-    is_valid, error_msg = validate_front_image(cv2.imdecode(front_image_np, cv2.IMREAD_COLOR))
+    # Validate front image
+    is_valid, error_msg = validate_front_image(front_image)
     
     if not is_valid:
-        return jsonify({
-            "error": error_msg,
-            "pose": "front",
-            "code": "INVALID_POSE"
-        }), 400
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": error_msg,
+                "pose": "front",
+                "code": "INVALID_POSE"
+            }
+        )
     
-    # Get user height if provided, otherwise use default
-    user_height_cm = request.form.get('height_cm')
+    # Get user height or use default
+    user_height_cm = height_cm if height_cm is not None else DEFAULT_HEIGHT_CM
     print(user_height_cm)
-    if user_height_cm:
-        try:
-            user_height_cm = float(user_height_cm)
-        except ValueError:
-            user_height_cm = DEFAULT_HEIGHT_CM
-    else:
-        user_height_cm = DEFAULT_HEIGHT_CM
     
-    received_images = {pose_name: request.files[pose_name] for pose_name in ["front", "left_side"] if pose_name in request.files}
+    # Process images
+    received_images = {"front": front_image}
+    if left_side:
+        left_side_bytes = await left_side.read()
+        left_side_np = np.frombuffer(left_side_bytes, np.uint8)
+        received_images["left_side"] = cv2.imdecode(left_side_np, cv2.IMREAD_COLOR)
+    
     measurements, scale_factor, focal_length, results = {}, None, FOCAL_LENGTH, {}
     frames = {}
     
-    for pose_name, image_file in received_images.items():
-        image_np = np.frombuffer(image_file.read(), np.uint8)
-        frame = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
+    for pose_name, frame in received_images.items():
         frames[pose_name] = frame  # Store the frame for contour detection
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results[pose_name] = holistic.process(rgb_frame)
@@ -451,10 +456,11 @@ def upload_images():
 
     print(measurements)
     
-    return jsonify({ 
+    return JSONResponse(content={ 
         "measurements": measurements,
         "debug_info": debug_info
     })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8001)
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=8001)
